@@ -1,0 +1,26 @@
+run_name: muvit3d_test
+
+data_dir: /mnt/lustre-grete/projects/nim00020/data/volume-em/cellmap/datasets/roi
+output: /mnt/vast-nhr/home/o.korchevaia/u24841/muvit_out    # checkpoints/logs written here
+n_channels: 1
+crop_size: [512, 512, 512]           # D H W; must divide evenly by patch_size and every value in levels
+patch_size: [8, 8, 8]                # one value (e.g. 8) or three (D H W)
+levels: "1,4,16"                     # comma-separated resolution factors, finest first
+
+val_fraction: 0.1
+batch_size: 2
+num_workers: 4
+epochs: 10
+lr: null
+
+num_layers: 12
+num_layers_decoder: 4
+dim: 512
+dim_decoder: 256
+heads: 8
+masking_ratio: 0.75
+
+normalize: percentile                # percentile | minmax | none
+logger: tensorboard                  # tensorboard | wandb | none
+seed: 42
+dry: false                           # true = fast sanity-check run, no logging/checkpoints
