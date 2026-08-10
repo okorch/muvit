@@ -327,7 +327,7 @@ def _validate_crop_size(crop_size: Size3D, patch_size: Size3D, levels: tuple[int
                 )
 
 
-def _print_config(args: argparse.Namespace) -> None:
+def _print_config(args: configargparse.Namespace) -> None:
     fields = {
         "Data directory": args.data_dir,
         "Output": args.output,
@@ -347,6 +347,54 @@ def _print_config(args: argparse.Namespace) -> None:
     for name, value in fields.items():
         print(f"{name:<15}: {value}")
     print(f"{'=' * width}\n")
+
+
+def _patch_tensorboard_add_images() -> None:
+    """Work around a bug in muvit's 3D image-preview logging: it hands
+    TensorBoard's SummaryWriter.add_images a tensor whose rank doesn't match
+    the given `dataformats` string (e.g. tensor shape (1, H, W) with
+    dataformats="NCHW", one axis short -- consistent with muvit already
+    having squeezed out the batch dim when it picked a slice/sample to
+    preview, without updating the format string to match).
+
+    Rather than dropping the preview, reconcile the format string (or
+    squeeze a stray singleton axis) to the tensor's actual rank so the slice
+    still gets logged normally.
+    """
+    from torch.utils.tensorboard import SummaryWriter
+
+    original_add_images = SummaryWriter.add_images
+
+    def safe_add_images(self, tag, img_tensor, global_step=None, walltime=None, dataformats="NCHW"):
+        ndim = getattr(img_tensor, "ndim", None)
+        if ndim is None or ndim == len(dataformats):
+            pass  # already consistent, nothing to fix
+        elif ndim == len(dataformats) - 1 and dataformats[0] == "N":
+            # batch axis already squeezed out upstream -- drop it from the format string
+            print(
+                f"[info] add_images('{tag}'): tensor rank {ndim} vs dataformats "
+                f"{dataformats!r}; using {dataformats[1:]!r} instead"
+            )
+            dataformats = dataformats[1:]
+        elif ndim == len(dataformats) + 1 and img_tensor.shape[0] == 1:
+            # a stray leading singleton axis -- squeeze it, keep the format string
+            print(f"[info] add_images('{tag}'): squeezing stray leading axis of size 1")
+            img_tensor = img_tensor[0]
+        else:
+            print(
+                f"[warn] add_images('{tag}'): cannot reconcile tensor shape "
+                f"{tuple(img_tensor.shape)} with dataformats={dataformats!r}; skipping this preview"
+            )
+            return None
+
+        try:
+            return original_add_images(self, tag, img_tensor, global_step=global_step, walltime=walltime,
+                                       dataformats=dataformats)
+        except AssertionError as exc:
+            print(f"[warn] add_images('{tag}') still failed after reconciliation: {exc}; skipping this preview")
+            return None
+
+    SummaryWriter.add_images = safe_add_images
 
 
 # --------------------------------------------------------------------------- #
@@ -396,6 +444,9 @@ def main() -> None:
         input_space="real",
         dropout=0.0,
     )
+
+    if args.logger == "tensorboard":
+        _patch_tensorboard_add_images()
 
     model.fit(
         train_dl,
