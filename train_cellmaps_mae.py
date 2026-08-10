@@ -252,7 +252,7 @@ def build_datasets(args: argparse.Namespace) -> tuple[CropDataset, CropDataset]:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train a 3D MuViT MAE on volumetric microscopy crops.")
 
-    p.add_argument("--config", type=str, default=None, help="YAML file of arguments; CLI flags override it.")
+    p.add_argument("-c", type=str, default=None, help="YAML file of arguments; CLI flags override it.")
 
     # Data
     p.add_argument("--data_dir", required=False, help="Folder containing 3D crops (searched recursively).")
