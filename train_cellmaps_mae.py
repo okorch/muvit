@@ -250,10 +250,10 @@ def build_datasets(args: argparse.Namespace) -> tuple[CropDataset, CropDataset]:
 # Argument parsing / validation
 # --------------------------------------------------------------------------- #
 def parse_args() -> argparse.Namespace:
+
     p = argparse.ArgumentParser(description="Train a 3D MuViT MAE on volumetric microscopy crops.")
 
-    p.add_argument("-c", type=str, default=None, help="YAML file of arguments; CLI flags override it.")
-
+    p.add_argument("-c", "--config", is_config_file=True, help="config file path")
     # Data
     p.add_argument("--data_dir", required=False, help="Folder containing 3D crops (searched recursively).")
     p.add_argument("--output", required=False, help="Folder for checkpoints/logs.")
@@ -293,39 +293,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--dry", action="store_true", help="Fast sanity-check run.")
 
-    # Two-pass parse: read --config first (if given), use its values as the
-    # parser's defaults, then do the real parse so any CLI flag still wins.
-    config_path = _peek_config_path()
-    if config_path is not None:
-        p.set_defaults(**_load_yaml_config(config_path))
-
     args = p.parse_args()
     if not args.data_dir or not args.output:
         p.error("--data_dir and --output are required (via CLI or --config).")
     return args
-
-
-def _peek_config_path() -> Optional[str]:
-    """Look for --config in sys.argv without disturbing the main parser."""
-    peek = argparse.ArgumentParser(add_help=False)
-    peek.add_argument("-c", type=str, default=None)
-    known, _ = peek.parse_known_args()
-    return known.config
-
-
-def _load_yaml_config(path: str) -> dict:
-    import yaml
-
-    with open(path) as f:
-        config = yaml.safe_load(f) or {}
-    # levels/crop_size/patch_size come through as native YAML types already;
-    # argparse's own parsing (nargs, type=str for --levels) is bypassed for
-    # anything set via set_defaults, so normalize the couple of fields whose
-    # CLI form differs from their natural YAML form.
-    if "levels" in config and not isinstance(config["levels"], str):
-        config["levels"] = ",".join(str(x) for x in config["levels"])
-    return config
-
 
 def _parse_levels(spec: str) -> tuple[int, ...]:
     levels = tuple(sorted(int(x.strip()) for x in spec.split(",")))
