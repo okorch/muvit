@@ -19,7 +19,7 @@ one native resolution is available.
 
 from __future__ import annotations
 
-import argparse
+import configargparse
 import random
 from pathlib import Path
 from typing import Optional, Sequence, Union
@@ -249,9 +249,9 @@ def build_datasets(args: argparse.Namespace) -> tuple[CropDataset, CropDataset]:
 # --------------------------------------------------------------------------- #
 # Argument parsing / validation
 # --------------------------------------------------------------------------- #
-def parse_args() -> argparse.Namespace:
+def parse_args() -> configargparse.Namespace:
 
-    p = argparse.ArgumentParser(description="Train a 3D MuViT MAE on volumetric microscopy crops.")
+    p = configargparse.ArgumentParser(description="Train a 3D MuViT MAE on volumetric microscopy crops.")
 
     p.add_argument("-c", "--config", is_config_file=True, help="config file path")
     # Data
