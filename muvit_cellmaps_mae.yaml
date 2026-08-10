@@ -11,7 +11,7 @@ val_fraction: 0.1
 batch_size: 2
 num_workers: 4
 epochs: 10
-lr: null
+#lr: null
 
 num_layers: 12
 num_layers_decoder: 4
