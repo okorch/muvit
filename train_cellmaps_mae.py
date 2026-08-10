@@ -308,7 +308,7 @@ def parse_args() -> argparse.Namespace:
 def _peek_config_path() -> Optional[str]:
     """Look for --config in sys.argv without disturbing the main parser."""
     peek = argparse.ArgumentParser(add_help=False)
-    peek.add_argument("--config", type=str, default=None)
+    peek.add_argument("-c", type=str, default=None)
     known, _ = peek.parse_known_args()
     return known.config
 
