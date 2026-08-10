@@ -122,9 +122,10 @@ def pyramid_level(img: np.ndarray, factor: int) -> np.ndarray:
 class CropDataset(MuViTDataset):
     """3D dataset for MuViT MAE pretraining.
 
-    Each sample is a native-resolution crop; `levels` (e.g. (1, 4, 16))
-    synthesizes coarser resolution levels from that same crop, all sharing
-    one physical field of view.
+    Each sample is defined by a native-resolution crop. ``levels`` (e.g.
+    ``(1, 4, 16)``) extracts increasingly larger physical fields of view
+    around the same crop center and downsamples each FOV back to the
+    native crop size.
 
     Returns {"img": (L, C, D, H, W), "bbox": (L, 2, 3)}.
     """
@@ -173,17 +174,87 @@ class CropDataset(MuViTDataset):
         return img.astype(np.float32)
 
     @staticmethod
-    def _random_crop(img: np.ndarray, size: Size3D) -> np.ndarray:
+    def _random_crop(
+        img: np.ndarray,
+        size: Size3D,
+    ) -> tuple[np.ndarray, tuple[int, int, int]]:
         _, D, H, W = img.shape
         crop_d, crop_h, crop_w = size
-        for dim, crop_dim, name in ((D, crop_d, "depth"), (H, crop_h, "height"), (W, crop_w, "width")):
+
+        for dim, crop_dim, name in (
+            (D, crop_d, "depth"),
+            (H, crop_h, "height"),
+            (W, crop_w, "width"),
+        ):
             if dim < crop_dim:
-                raise ValueError(f"Volume {name} {dim} is smaller than requested crop {name} {crop_dim}")
+                raise ValueError(
+                    f"Volume {name} {dim} is smaller than requested "
+                    f"crop {name} {crop_dim}"
+                )
 
         z0 = random.randint(0, D - crop_d)
         y0 = random.randint(0, H - crop_h)
         x0 = random.randint(0, W - crop_w)
-        return img[:, z0 : z0 + crop_d, y0 : y0 + crop_h, x0 : x0 + crop_w]
+
+        crop = img[
+            :,
+            z0 : z0 + crop_d,
+            y0 : y0 + crop_h,
+            x0 : x0 + crop_w,
+        ]
+
+        return crop, (z0, y0, x0)
+
+    @staticmethod
+    def _crop_padded(
+        img: np.ndarray,
+        start: tuple[int, int, int],
+        size: Size3D,
+    ) -> tuple[np.ndarray, tuple[int, int, int], tuple[int, int, int]]:
+        """Extract a crop, padding with zeros when it exceeds the volume.
+
+        Returns
+        -------
+        crop:
+            Padded crop.
+        bbox_start:
+            Start coordinate of the requested crop in native volume space.
+        bbox_end:
+            End coordinate of the requested crop in native volume space.
+        """
+        _, D, H, W = img.shape
+        starts = start
+        sizes = size
+        shape = (D, H, W)
+
+        ends = tuple(s + n for s, n in zip(starts, sizes))
+
+        src_starts = tuple(max(s, 0) for s in starts)
+        src_ends = tuple(min(e, dim) for e, dim in zip(ends, shape))
+
+        pad_before = tuple(max(-s, 0) for s in starts)
+        pad_after = tuple(max(e - dim, 0) for e, dim in zip(ends, shape))
+
+        crop = img[
+            :,
+            src_starts[0] : src_ends[0],
+            src_starts[1] : src_ends[1],
+            src_starts[2] : src_ends[2],
+        ]
+
+        if any(pad_before) or any(pad_after):
+            crop = np.pad(
+                crop,
+                (
+                    (0, 0),
+                    (pad_before[0], pad_after[0]),
+                    (pad_before[1], pad_after[1]),
+                    (pad_before[2], pad_after[2]),
+                ),
+                mode="constant",
+            )
+
+        return crop, starts, ends
 
     @staticmethod
     def _random_flip_rot(img: np.ndarray) -> np.ndarray:
@@ -192,34 +263,124 @@ class CropDataset(MuViTDataset):
             if random.random() < 0.5:
                 img = np.flip(img, axis=axis)
 
-        plane = random.choice([(1, 2), (1, 3), (2, 3)])  # Z-Y, Z-X, Y-X
+        plane = random.choice([(1, 2), (1, 3), (2, 3)])
         k = random.randint(0, 3)
         if k:
             img = np.rot90(img, k=k, axes=plane)
 
         return np.ascontiguousarray(img)
 
+    @staticmethod
+    def _downsample_to_crop_size(
+        img: np.ndarray,
+        size: Size3D,
+    ) -> np.ndarray:
+        """Downsample a (C, D, H, W) FOV back to the requested patch size."""
+        if tuple(img.shape[1:]) == tuple(size):
+            return img
+
+        tensor = torch.from_numpy(np.ascontiguousarray(img))
+        tensor = torch.nn.functional.interpolate(
+            tensor.unsqueeze(0),
+            size=size,
+            mode="trilinear",
+            align_corners=False,
+        )
+        return tensor.squeeze(0).numpy()
+
     def __getitem__(self, idx: int) -> dict:
         path = self._files[idx]
         img = load_image(path)
 
         if img.shape[0] != self._n_channels:
-            raise ValueError(f"{path} has {img.shape[0]} channel(s), expected {self._n_channels}.")
+            raise ValueError(
+                f"{path} has {img.shape[0]} channel(s), "
+                f"expected {self._n_channels}."
+            )
 
-        if self._crop_size is not None:
-            img = self._random_crop(img, self._crop_size)
-
-        img = self._normalize_img(img)  # normalize before building the pyramid
-
-        if self._augment:
-            img = self._random_flip_rot(img)
+        img = self._normalize_img(img)
 
         _, D, H, W = img.shape
-        pyramid = np.stack([pyramid_level(img, factor) for factor in self._levels], axis=0)
-        img_t = torch.from_numpy(np.ascontiguousarray(pyramid, dtype=np.float32))
+        volume_shape = (D, H, W)
 
-        # All synthetic levels share the same physical FOV -> identical bboxes.
-        bbox = torch.tensor([[[0, 0, 0], [D, H, W]]] * len(self._levels), dtype=torch.float32)
+        if self._crop_size is None:
+            crop_size = (D, H, W)
+            fine_start = (0, 0, 0)
+        else:
+            crop_size = self._crop_size
+            _, fine_start = self._random_crop(img, crop_size)
+
+        crop_d, crop_h, crop_w = crop_size
+
+        # The finest-level crop defines the reference physical FOV.
+        fine_end = tuple(
+            start + size
+            for start, size in zip(fine_start, crop_size)
+        )
+
+        center = tuple(
+            (start + end) / 2
+            for start, end in zip(fine_start, fine_end)
+        )
+
+        pyramid = []
+        bboxes = []
+
+        for factor in self._levels:
+            # Increase the native-resolution FOV by `factor`, while keeping
+            # its center fixed at the center of the finest-level crop.
+            level_size = tuple(
+                size * factor
+                for size in crop_size
+            )
+
+            level_start = tuple(
+                int(round(c - size / 2))
+                for c, size in zip(center, level_size)
+            )
+
+            level_crop, level_start, level_end = self._crop_padded(
+                img,
+                level_start,
+                level_size,
+            )
+
+            # Downsample the larger physical FOV back to the same patch size.
+            level_crop = self._downsample_to_crop_size(
+                level_crop,
+                crop_size,
+            )
+
+            pyramid.append(level_crop)
+
+            # Bbox is expressed in native volume coordinates.  This makes
+            # every level describe the actual FOV that was sampled.
+            bboxes.append(
+                [
+                    level_start,
+                    level_end,
+                ]
+            )
+
+        if self._augment:
+            # Apply identical spatial augmentation to all levels so that
+            # their correspondence is preserved.
+            pyramid = np.stack(pyramid, axis=0)
+            pyramid = np.stack(
+                [self._random_flip_rot(level) for level in pyramid],
+                axis=0,
+            )
+        else:
+            pyramid = np.stack(pyramid, axis=0)
+
+        img_t = torch.from_numpy(
+            np.ascontiguousarray(pyramid, dtype=np.float32)
+        )
+
+        bbox = torch.tensor(
+            bboxes,
+            dtype=torch.float32,
+        )
 
         return {"img": img_t, "bbox": bbox}
 
@@ -227,7 +388,7 @@ class CropDataset(MuViTDataset):
 # --------------------------------------------------------------------------- #
 # Dataset construction / split
 # --------------------------------------------------------------------------- #
-def build_datasets(args: argparse.Namespace) -> tuple[CropDataset, CropDataset]:
+def build_datasets(args: configargparse.Namespace) -> tuple[CropDataset, CropDataset]:
     files = sorted(p for p in Path(args.data_dir).rglob("*") if p.suffix.lower() in IMG_EXTS)
     if not files:
         raise FileNotFoundError(
